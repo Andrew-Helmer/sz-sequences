@@ -29,14 +29,14 @@ namespace sz_sequences {
 
 // Gets a single coordinate of the unscrambled, unshuffled SZ sequence, in
 // [0, 1).
-float GetSZCoord(const uint32_t index, const int dim);
+float GetSZCoord(const int index, const int dim);
 
 // Gets a single coordinate of the shuffled and scrambled SZ sequence, in
 // [0, 1). The same seed must be used for all dimensions of a point, otherwise
 // the dimensions will be shuffled differently and the points won't be
 // stratified across dimensions. Different seeds will decorrelate the
 // sequences.
-float GetShuffledScrambledSZCoord(const uint32_t index,
+float GetShuffledScrambledSZCoord(const int index,
                                   const int dim,
                                   const uint32_t seed);
 

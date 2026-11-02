@@ -319,11 +319,11 @@ inline uint32_t GetSZBits(const uint32_t index, const int dim) {
 }
 }  // namespace
 
-float GetSZCoord(const uint32_t index, const int dim) {
-  return BitsToFloat(GetSZBits(index, dim));
+float GetSZCoord(const int index, const int dim) {
+  return BitsToFloat(GetSZBits(static_cast<uint32_t>(index), dim));
 }
 
-float GetShuffledScrambledSZCoord(const uint32_t index,
+float GetShuffledScrambledSZCoord(const int index,
                                   const int dim,
                                   const uint32_t seed) {
   // Hashing the seed first means that similar seeds (e.g. 0, 1, 2...) will
@@ -335,11 +335,12 @@ float GetShuffledScrambledSZCoord(const uint32_t index,
   // stratification is maintained. The shuffling must be the same for all
   // dimensions, so it doesn't depend on dim.
   const uint32_t shuffled_index =
-      NestedUniformScrambleBase2(index, hashed_seed);
+      NestedUniformScrambleBase2(static_cast<uint32_t>(index), hashed_seed);
 
   // Scrambling is Owen-scrambling on the coordinate, with a different seed for
   // each dimension.
-  const uint32_t dim_seed = CombineHashes(hashed_seed, Hash(dim));
+  const uint32_t dim_seed =
+      CombineHashes(hashed_seed, Hash(static_cast<uint32_t>(dim)));
   const uint32_t scrambled_bits =
       NestedUniformScrambleBase2(GetSZBits(shuffled_index, dim), dim_seed);
   return BitsToFloat(scrambled_bits);

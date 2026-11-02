@@ -9,8 +9,10 @@
  * (0, 2^q)-Sequences" by Ahmed et al. (2025), with shuffling and scrambling
  * from "Practical Hash-based Owen Scrambling" by Burley (2020).
  *
- * The generator matrices are computed at compile-time, using a new direct
- * construction of the SZ sequence matrices. Nothing here allocates heap memory.
+ * The generator matrices are computed at compile-time, using the direct
+ * construction of the SZ sequence matrices from
+ * https://andrew-helmer.github.io/sz-matrix-construction/
+ * Nothing here allocates heap memory.
  */
 #include "sz_sequences.h"
 
@@ -32,16 +34,16 @@ static_assert(kNumDimensions >= 2 && kNumDimensions <= 65536,
 // The generator matrices are 32x32, so every coordinate has 32 bits.
 static constexpr int kMatrixSize = 32;
 
-namespace {
-
 /*
  * From here on down are the constexpr functions to construct the generator
- * matrices at compile-time.
+ * matrices at compile-time, from "A Direct Construction of SZ Sequence
+ * Matrices" (https://andrew-helmer.github.io/sz-matrix-construction/).
  */
 
 // Gets the number of bits needed to represent a value, e.g. 15 -> 4 and
-// 16 -> 5.
-constexpr int GetBitLength(uint32_t value) {
+// 16 -> 5. For d > 0, this is floor(log_2(d)) + 1, where j = floor(log_2(d))
+// is the index of the highest set bit of d (Step 3 of the algorithm).
+static constexpr int GetBitLength(uint32_t value) {
   int bit_length = 0;
   while (value != 0) {
     bit_length++;
@@ -50,64 +52,67 @@ constexpr int GetBitLength(uint32_t value) {
   return bit_length;
 }
 
-// Each power-of-two number of dimensions needs one more basis matrix, so for
-// 16 dimensions we need 4 basis matrices.
+// To generate kNumDimensions (up to dimension d = kNumDimensions - 1), we need
+// j + 1 basis matrices E_0, ..., E_j, where j = floor(log_2(d)). For 16
+// dimensions (max d = 15), j = 3, so we need 4 basis matrices.
 static constexpr int kNumBasisMatrices = GetBitLength(kNumDimensions - 1);
 
-// A square binary matrix of up to 32x32 entries. During matrix construction,
-// each row is stored as a single 32-bit integer, where the entry in column c
-// is bit c. Smaller matrices (like the basis matrices) just use the first rows
-// and the lowest bits.
+// A square column-major binary matrix of up to 32x32 entries. During matrix
+// construction, each column is stored as a single 32-bit integer, where the
+// entry in row r is bit r. Smaller matrices (like the basis matrices) just use
+// the first columns and the lowest bits.
 struct BinaryMatrix {
-  uint32_t rows[kMatrixSize] = {};
+  uint32_t cols[kMatrixSize] = {};
 };
 
-constexpr BinaryMatrix GetIdentityMatrix(const int size) {
+static constexpr BinaryMatrix GetIdentityMatrix(const int size) {
   BinaryMatrix identity;
-  for (int row = 0; row < size; row++) {
-    identity.rows[row] = 1u << row;
+  for (int col = 0; col < size; col++) {
+    identity.cols[col] = 1u << col;
   }
   return identity;
 }
 
+// Repeats a block matrix along the main diagonal, up to a target size. All
+// other entries are zero. Used in Step 2.2.1 of the basis matrix algorithm
+// to construct E'_i from E_i.
+static constexpr BinaryMatrix RepeatDiagonal(const BinaryMatrix& block,
+                                             const int block_size,
+                                             const int target_size) {
+  BinaryMatrix repeated;
+  for (int offset = 0; offset < target_size; offset += block_size) {
+    for (int col = 0; col < block_size; col++) {
+      repeated.cols[offset + col] = block.cols[col] << offset;
+    }
+  }
+  return repeated;
+}
+
 // Multiplies two size x size binary matrices, with all values modulo 2.
 //
-// In standard matrix multiplication, entry (row, k) of left * right is the sum
-// over col of left[row][col] * right[col][k]. Viewed a whole row at a time,
-// row "row" of the product is the sum of right.rows[col] for every col where
-// entry (row, col) of the left matrix is 1. Since addition modulo 2 is xor, we
-// just xor those rows together.
-constexpr BinaryMatrix MultiplyMatrices(const BinaryMatrix& left,
-                                        const BinaryMatrix& right,
-                                        const int size) {
+// In standard matrix multiplication, entry (k, col) of left * right is the sum
+// over row of left[k][row] * right[row][col]. Viewed a whole column at a time,
+// column "col" of the product is the sum of left.cols[row] for every row where
+// entry (row, col) of the right matrix is 1. Since addition modulo 2 is xor,
+// we just xor those columns together.
+static constexpr BinaryMatrix MultiplyMatrices(const BinaryMatrix& left,
+                                               const BinaryMatrix& right,
+                                               const int size) {
   BinaryMatrix product;
-  for (int row = 0; row < size; row++) {
-    for (int col = 0; col < size; col++) {
-      if ((left.rows[row] >> col) & 1) {
-        product.rows[row] ^= right.rows[col];
+  for (int col = 0; col < size; col++) {
+    for (int row = 0; row < size; row++) {
+      if ((right.cols[col] >> row) & 1) {
+        product.cols[col] ^= left.cols[row];
       }
     }
   }
   return product;
 }
 
-// Repeats a block matrix along the main diagonal, up to a target size. All
-// other entries are zero.
-constexpr BinaryMatrix RepeatDiagonal(const BinaryMatrix& block,
-                                      const int block_size,
-                                      const int target_size) {
-  BinaryMatrix repeated;
-  for (int offset = 0; offset < target_size; offset += block_size) {
-    for (int row = 0; row < block_size; row++) {
-      repeated.rows[offset + row] = block.rows[row] << offset;
-    }
-  }
-  return repeated;
-}
-
-// The basis matrices are the building blocks of all the generator matrices.
-// The first one is the 1x1 matrix [1], and each power-of-two group of basis
-// matrices doubles in size: 1x1, 2x2, 4x4, 4x4, 8x8, 8x8, 8x8, 8x8, etc.
+// The basis matrices (E_0, E_1, ..., E_j) are the building blocks of all the
+// generator matrices. The first one is the 1x1 matrix [1], and each
+// power-of-two group of basis matrices doubles in size: 1x1, 2x2, 4x4, 4x4,
+// 8x8, 8x8, 8x8, 8x8, etc.
 //
 // Mathematically, each doubling step builds a quadratic finite-field extension
 // over GF(2) in matrix form (GF(2) -> GF(4) -> GF(16) -> GF(256) ...), using
@@ -118,67 +123,80 @@ struct BasisMatrices {
   int sizes[kNumBasisMatrices] = {};
 };
 
-constexpr BasisMatrices GenerateBasisMatrices() {
+// Generates the j + 1 basis block matrices E_0, E_1, ..., E_j, following the
+// basis matrix algorithm in "New Matrix Construction Algorithm" in the blog
+// post.
+static constexpr BasisMatrices GenerateBasisMatrices() {
   BasisMatrices basis;
+  // Step 1: Initialize E_0 = [1] and n = 1 (here n is subblock_size).
   basis.matrices[0] = GetIdentityMatrix(1);
   basis.sizes[0] = 1;
 
-  // In each iteration, subblock_size is both the number of basis matrices
+  // Step 2: While n <= j (with Step 2.3, n <- 2n, at the end of each loop).
+  // In each iteration, subblock_size (n) is both the number of basis matrices
   // generated so far, and the size of the last basis matrix (beta).
   for (int subblock_size = 1; subblock_size < kNumBasisMatrices;
        subblock_size *= 2) {
+    // Step 2.1: Set beta = E_{n-1} (which is an n x n matrix).
     const BinaryMatrix beta = basis.matrices[subblock_size - 1];
-    for (int idx = 0;
-         idx < subblock_size && subblock_size + idx < kNumBasisMatrices;
-         idx++) {
-      // Each of the earlier basis matrices is repeated along the diagonal to
-      // subblock_size, then multiplied by the companion matrix of
-      // x^2 + x + beta = 0 to construct a new basis matrix of twice the size:
-      //   | 0    I | * | enlarged 0        | = | 0             enlarged |
-      //   | beta I |   | 0        enlarged |   | beta*enlarged enlarged |
+
+    // Step 2.2: For i = 0 ... n - 1 (while n + i <= j):
+    for (int i = 0;
+         i < subblock_size && subblock_size + i < kNumBasisMatrices;
+         i++) {
+      // Step 2.2.1: Let E'_i ("enlarged") be E_i repeated along the main
+      // diagonal to size n x n.
       const BinaryMatrix enlarged = RepeatDiagonal(
-          basis.matrices[idx], basis.sizes[idx], subblock_size);
+          basis.matrices[i], basis.sizes[i], subblock_size);
       const BinaryMatrix beta_enlarged =
           MultiplyMatrices(beta, enlarged, subblock_size);
 
-      BinaryMatrix& next_basis = basis.matrices[subblock_size + idx];
-      for (int row = 0; row < subblock_size; row++) {
-        next_basis.rows[row] = enlarged.rows[row] << subblock_size;
-        next_basis.rows[subblock_size + row] =
-            beta_enlarged.rows[row] | (enlarged.rows[row] << subblock_size);
+      // Step 2.2.2: Construct the 2n x 2n basis matrix E_{n+i} as the 2 x 2
+      // block matrix:
+      //   E_{n+i} = | 0_n        E'_i |
+      //             | beta*E'_i  E'_i |
+      // (This comes from multiplying the companion matrix of x^2 + x + beta = 0
+      // by E'_i repeated on the diagonal.)
+      BinaryMatrix& next_basis = basis.matrices[subblock_size + i];
+      for (int col = 0; col < subblock_size; col++) {
+        next_basis.cols[col] = beta_enlarged.cols[col] << subblock_size;
+        next_basis.cols[subblock_size + col] =
+            enlarged.cols[col] | (enlarged.cols[col] << subblock_size);
       }
-      basis.sizes[subblock_size + idx] = subblock_size * 2;
+      basis.sizes[subblock_size + i] = subblock_size * 2;
     }
   }
   return basis;
 }
 
-// Constructs the 32x32 upper triangular block-Pascal matrix from a square
-// block, where the block in block row i and block column j (for j >= i) is
-// binom(j, i) * block^(j - i), modulo 2.
-constexpr BinaryMatrix GetBlockPascalMatrix(const BinaryMatrix& block,
-                                            const int block_size) {
+// Constructs the 32x32 upper triangular block-Pascal matrix P(X) from an
+// m x m square block X ("block" of size "block_size"), where each m x m block
+// in block row i and block column j (for j >= i) is defined as:
+//   P(X)_{i,j} = binom(j, i) * X^(j - i) (mod 2).
+static constexpr BinaryMatrix GetBlockPascalMatrix(const BinaryMatrix& block,
+                                                   const int block_size) {
   const int num_blocks = kMatrixSize / block_size;
   BinaryMatrix pascal_matrix;
 
-  // We loop over each block diagonal, which all have the same block power.
+  // We loop over each block diagonal (power = j - i), which all have the same
+  // block power X^(j - i).
   BinaryMatrix block_power = GetIdentityMatrix(block_size);
   for (int power = 0; power < num_blocks; power++) {
     for (int block_row = 0; block_row + power < num_blocks; block_row++) {
       const int block_col = block_row + power;
-      // We need to know if binom(block_col, block_row) is odd (1 mod 2).
-      // Lucas' theorem, from "Theorie des Fonctions Numeriques Simplement
-      // Periodiques" by Lucas (1878), says that binom(n, k) mod 2 is the
-      // product of binom(n_i, k_i) over each bit i of n and k. For single
-      // bits, binom(0, 1) = 0 and all other cases are 1, so binom(n, k) is
-      // odd if and only if every set bit in k is also set in n.
+      // We need to know if binom(j, i) = binom(block_col, block_row) is odd
+      // (1 mod 2). Lucas' theorem, from "Theorie des Fonctions Numeriques
+      // Simplement Periodiques" by Lucas (1878), says that binom(n, k) mod 2
+      // is the product of binom(n_b, k_b) over each bit b of n and k. For
+      // single bits, binom(0, 1) = 0 and all other cases are 1, so binom(n, k)
+      // is odd if and only if every set bit in k is also set in n.
       if ((block_col & block_row) != block_row) {
         continue;
       }
 
-      for (int row = 0; row < block_size; row++) {
-        pascal_matrix.rows[block_row * block_size + row] |=
-            block_power.rows[row] << (block_col * block_size);
+      for (int col = 0; col < block_size; col++) {
+        pascal_matrix.cols[block_col * block_size + col] |=
+            block_power.cols[col] << (block_row * block_size);
       }
     }
     block_power = MultiplyMatrices(block_power, block, block_size);
@@ -186,65 +204,25 @@ constexpr BinaryMatrix GetBlockPascalMatrix(const BinaryMatrix& block,
   return pascal_matrix;
 }
 
-// For fast point generation, each 32x32 generator matrix is stored as an array
-// of 32 column integers, where row r of a column is stored in bit (31 - r), so
-// that the first row (row 0) gives the most significant bit of the coordinate.
-struct GeneratorMatrices {
-  uint32_t columns[kNumDimensions][kMatrixSize] = {};
-};
-
-// Generates all the SZ sequence generator matrices. The first matrix is the
-// identity, and each block-Pascal matrix (one for each basis matrix) doubles
-// the number of generator matrices by right-multiplying all of the previous
-// generator matrices.
-//
-// Because block-Pascal matrices satisfy P(A + B) = P(A) * P(B) for commuting
-// matrices A and B modulo 2, right-multiplying by each basis block-Pascal
-// matrix generates the block-Pascal matrices for all combinations of the basis
-// matrices.
-constexpr GeneratorMatrices GenerateSZMatrices() {
-  GeneratorMatrices sz;
-  for (int col = 0; col < kMatrixSize; col++) {
-    sz.columns[0][col] = 0x80000000u >> col;
-  }
-
-  const BasisMatrices basis = GenerateBasisMatrices();
-  int num_generated = 1;
-  for (int basis_idx = 0; basis_idx < kNumBasisMatrices; basis_idx++) {
-    const BinaryMatrix pascal_matrix =
-        GetBlockPascalMatrix(basis.matrices[basis_idx], basis.sizes[basis_idx]);
-
-    const int prev_len = num_generated;
-    for (int prev_idx = 0;
-         prev_idx < prev_len && num_generated < kNumDimensions; prev_idx++) {
-      // Just as multiplying on the left combines the rows of the right matrix,
-      // multiplying on the right (prev_matrix * pascal_matrix) combines the
-      // columns of the left matrix: column "col" of the product is the sum
-      // (xor) of prev_cols[row] for every row where entry (row, col) of the
-      // Pascal matrix is 1. Because the Pascal matrix is upper triangular,
-      // entry (row, col) can only be 1 when row <= col.
-      const uint32_t* prev_cols = sz.columns[prev_idx];
-      uint32_t* next_cols = sz.columns[num_generated];
-      for (int col = 0; col < kMatrixSize; col++) {
-        for (int row = 0; row <= col; row++) {
-          if ((pascal_matrix.rows[row] >> col) & 1) {
-            next_cols[col] ^= prev_cols[row];
-          }
-        }
+// Multiplies two size x size non-singular upper-triangular (NUT) binary
+// matrices modulo 2. This is the same as MultiplyMatrices, except that because
+// the right matrix is upper-triangular, entry (row, col) can only be 1 when
+// row <= col. Skipping the lower triangle cuts the work in half.
+static constexpr BinaryMatrix MultiplyNUTMatrices(const BinaryMatrix& left,
+                                                  const BinaryMatrix& right,
+                                                  const int size) {
+  BinaryMatrix product;
+  for (int col = 0; col < size; col++) {
+    for (int row = 0; row <= col; row++) {
+      if ((right.cols[col] >> row) & 1) {
+        product.cols[col] ^= left.cols[row];
       }
-      num_generated++;
     }
   }
-  return sz;
+  return product;
 }
 
-static constexpr GeneratorMatrices kSZMatrices = GenerateSZMatrices();
-
-/*
- * Shuffling and scrambling functions from "Practical Hash-based Owen
- * Scrambling" (Burley 2020).
- */
-inline uint32_t ReverseBits(uint32_t value) {
+static constexpr uint32_t ReverseBits(uint32_t value) {
   value = (((value & 0xaaaaaaaa) >> 1) | ((value & 0x55555555) << 1));
   value = (((value & 0xcccccccc) >> 2) | ((value & 0x33333333) << 2));
   value = (((value & 0xf0f0f0f0) >> 4) | ((value & 0x0f0f0f0f) << 4));
@@ -252,12 +230,118 @@ inline uint32_t ReverseBits(uint32_t value) {
   return ((value >> 16) | (value << 16));
 }
 
+struct GeneratorMatrices {
+  BinaryMatrix matrices[kNumDimensions];
+};
+
+// Generates all the SZ sequence generator matrices, using the algorithm from
+// https://andrew-helmer.github.io/sz-matrix-construction/
+//
+// In the single-matrix algorithm from the blog post, the N x N generator
+// matrix M for dimension d is constructed by:
+//   Step 1: Initialize M = I_N (and if d = 0, return M in Step 2).
+//   Step 3-4: Generate the basis block matrices E_0, E_1, ..., E_j, where
+//             j = floor(log_2(d)).
+//   Step 5: For i = 0 ... j, if bit i of d is set ((d >> i) & 1), multiply M
+//           on the right by the block-Pascal matrix P(E_i): M <- M * P(E_i).
+//
+// As described in the "Generating Multiple Matrices" section of the blog post,
+// we can generate all dimensions at once without repeating work: for each i
+// from 0 to j, dimensions d = 2^i + prev_d have the same set bits as prev_d
+// plus bit i, so their generator matrices are just M_{prev_d} * P(E_i). Each
+// P(E_i) therefore doubles the array of generator matrices by right-multiplying
+// the previously generated ones.
+static constexpr GeneratorMatrices GenerateSZMatrices() {
+  GeneratorMatrices sz;
+  // Step 1-2: Initialize M_0 = I_N (the 32x32 identity matrix).
+  sz.matrices[0] = GetIdentityMatrix(kMatrixSize);
+
+  // Step 4: Generate the j + 1 basis block matrices E_0, ..., E_j.
+  const BasisMatrices basis = GenerateBasisMatrices();
+
+  // Step 5: For i = 0 ... j, compute P(E_i) and right-multiply each previously
+  // generated matrix M by P(E_i) (M <- M * P(E_i)). Because both M and P(E_i)
+  // are non-singular upper-triangular (NUT) matrices, we can use
+  // MultiplyNUTMatrices.
+  int num_generated = 1;
+  for (int i = 0; i < kNumBasisMatrices; i++) {
+    const BinaryMatrix pascal_matrix =
+        GetBlockPascalMatrix(basis.matrices[i], basis.sizes[i]);
+
+    const int prev_len = num_generated;
+    for (int prev_d = 0;
+         prev_d < prev_len && num_generated < kNumDimensions; prev_d++) {
+      sz.matrices[num_generated] = MultiplyNUTMatrices(
+          sz.matrices[prev_d], pascal_matrix, kMatrixSize);
+      num_generated++;
+    }
+  }
+
+  // Reverse the bits of each column so that the first row (row 0) gives the
+  // most significant bit (bit 31) of the 32-bit coordinate.
+  for (int dim = 0; dim < kNumDimensions; dim++) {
+    for (int col = 0; col < kMatrixSize; col++) {
+      sz.matrices[dim].cols[col] = ReverseBits(sz.matrices[dim].cols[col]);
+    }
+  }
+  return sz;
+}
+
+static constexpr GeneratorMatrices kSZMatrices = GenerateSZMatrices();
+
+// Gets a coordinate of the SZ sequence as a 32-bit fixed point value.
+static inline uint32_t GetSZBits(const uint32_t index, const int dim) {
+  assert(dim >= 0 && dim < kNumDimensions);
+  // In a digital sequence, the coordinate is generated by multiplying the
+  // generator matrix by the column vector of bits of the sample index. That
+  // matrix-vector product is the xor of the generator matrix columns for each
+  // set bit of the index.
+  uint32_t bits = 0;
+  uint32_t remaining_index = index;
+  for (int bit = 0; remaining_index != 0; bit++) {
+    if (remaining_index & 1) {
+      bits ^= kSZMatrices.matrices[dim].cols[bit];
+    }
+    remaining_index >>= 1;
+  }
+  return bits;
+}
+
+// Converts a 32-bit fixed point value to a float in [0, 1). A float only has 24
+// bits of precision, so we only use the 24 most significant bits. Otherwise
+// values very close to 1 could be rounded up to exactly 1.
+static inline float BitsToFloat(const uint32_t bits) {
+  return static_cast<float>(bits >> 8) / 16777216.0f;  // 2^24
+}
+
+float GetSZCoord(const int index, const int dim) {
+  const uint32_t unscrambled_bits =
+      GetSZBits(static_cast<uint32_t>(index), dim);
+  return BitsToFloat(unscrambled_bits);
+}
+
+/*
+ * Shuffling and scrambling functions from "Practical Hash-based Owen
+ * Scrambling" (Burley 2020).
+ */
+
+static inline uint32_t Hash(uint32_t value) {
+  // finalizer from murmurhash3
+  value ^= value >> 16;
+  value *= 0x85ebca6bu;
+  value ^= value >> 13;
+  value *= 0xc2b2ae35u;
+  value ^= value >> 16;
+  return value;
+}
+
 // Burley's version of the permutation from "Stratified Sampling for Stochastic
 // Transparency" (Laine and Karras 2011). Because each even constant is
 // multiplied by value, carries and bit-mixes only flow from lower bits into
 // higher bits, so each bit of the output only depends on the seed and the same
 // bit or lower bits of the input.
-inline uint32_t LaineKarrasPermutation(uint32_t value, const uint32_t seed) {
+static inline uint32_t LaineKarrasPermutation(uint32_t value,
+                                              const uint32_t seed) {
   value += seed;
   value ^= value * 0x6c50b47cu;
   value ^= value * 0xb82f1e52u;
@@ -271,56 +355,17 @@ inline uint32_t LaineKarrasPermutation(uint32_t value, const uint32_t seed) {
 // flipped depends on all the more significant bits above it. By reversing the
 // bits before and after LaineKarrasPermutation, each bit of the output only
 // depends on the seed and the same bit or higher bits of the input.
-inline uint32_t NestedUniformScrambleBase2(uint32_t value,
-                                           const uint32_t seed) {
+static inline uint32_t NestedUniformScrambleBase2(uint32_t value,
+                                                  const uint32_t seed) {
   value = ReverseBits(value);
   value = LaineKarrasPermutation(value, seed);
   value = ReverseBits(value);
   return value;
 }
 
-inline uint32_t CombineHashes(const uint32_t seed, const uint32_t value) {
+static inline uint32_t CombineHashes(const uint32_t seed,
+                                     const uint32_t value) {
   return seed ^ (value + (seed << 6) + (seed >> 2));
-}
-
-inline uint32_t Hash(uint32_t value) {
-  // finalizer from murmurhash3
-  value ^= value >> 16;
-  value *= 0x85ebca6bu;
-  value ^= value >> 13;
-  value *= 0xc2b2ae35u;
-  value ^= value >> 16;
-  return value;
-}
-
-// Converts a 32-bit fixed point value to a float in [0, 1). A float only has 24
-// bits of precision, so we only use the 24 most significant bits. Otherwise
-// values very close to 1 could be rounded up to exactly 1.
-inline float BitsToFloat(const uint32_t bits) {
-  return static_cast<float>(bits >> 8) / 16777216.0f;  // 2^24
-}
-
-// Gets a coordinate of the SZ sequence as a 32-bit fixed point value.
-inline uint32_t GetSZBits(const uint32_t index, const int dim) {
-  assert(dim >= 0 && dim < kNumDimensions);
-  // In a digital sequence, the coordinate is generated by multiplying the
-  // generator matrix by the column vector of bits of the sample index. That
-  // matrix-vector product is the xor of the generator matrix columns for each
-  // set bit of the index.
-  uint32_t bits = 0;
-  uint32_t remaining_index = index;
-  for (int bit = 0; remaining_index != 0; bit++) {
-    if (remaining_index & 1) {
-      bits ^= kSZMatrices.columns[dim][bit];
-    }
-    remaining_index >>= 1;
-  }
-  return bits;
-}
-}  // namespace
-
-float GetSZCoord(const int index, const int dim) {
-  return BitsToFloat(GetSZBits(static_cast<uint32_t>(index), dim));
 }
 
 float GetShuffledScrambledSZCoord(const int index,
@@ -341,8 +386,9 @@ float GetShuffledScrambledSZCoord(const int index,
   // each dimension.
   const uint32_t dim_seed =
       CombineHashes(hashed_seed, Hash(static_cast<uint32_t>(dim)));
+  const uint32_t unscrambled_bits = GetSZBits(shuffled_index, dim);
   const uint32_t scrambled_bits =
-      NestedUniformScrambleBase2(GetSZBits(shuffled_index, dim), dim_seed);
+      NestedUniformScrambleBase2(unscrambled_bits, dim_seed);
   return BitsToFloat(scrambled_bits);
 }
 

@@ -2,7 +2,7 @@
 
 This is a short and simple C++ implementation of the SZ sequence, from ["SZ Sequences: Binary-Based (0, 2^q)-Sequences"](https://dl.acm.org/doi/10.1145/3763272) by Ahmed et al. (2025). The points can be shuffled and scrambled using the hash-based approach from ["Practical Hash-based Owen Scrambling"](https://jcgt.org/published/0009/04/01/) by Burley (2020).
 
-It's just one header and one cpp file. The generator matrices are all computed at compile-time, and nothing allocates heap memory.
+It's just one header and one cpp file. The generator matrices are all computed at compile-time using a new [direct construction](https://andrew-helmer.github.io/sz-matrix-construction/), and nothing allocates heap memory.
 
 ## The SZ Sequence
 

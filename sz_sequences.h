@@ -9,7 +9,8 @@
  * "SZ Sequences: Binary-Based (0, 2^q)-Sequences" by Ahmed et al. (2025),
  * either unscrambled and unshuffled, or shuffled and scrambled using the
  * hash-based approach from "Practical Hash-based Owen Scrambling"
- * by Burley (2020).
+ * by Burley (2020). The generator matrices are computed using the direct
+ * construction from https://andrew-helmer.github.io/sz-matrix-construction/
  *
  * The SZ sequence is a base-2 sequence where every aligned pair of dimensions
  * (0+1, 2+3, etc.) forms a base-2 (0,2)-sequence, every aligned group of four
